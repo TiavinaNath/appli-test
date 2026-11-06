@@ -1,0 +1,76 @@
+name: POJA Import CI
+
+on:
+  push:
+    branches:
+      - import-127bcd87-e2b6-4704-8253-c14d9f603fe0-post-transformation
+env:
+  ORG_ID: c08d8a07-6d56-4d67-9c47-615bbb92488b
+  IMPORT_ID: 127bcd87-e2b6-4704-8253-c14d9f603fe0
+
+jobs:
+  post-transformation-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+
+    steps:
+      - uses: actions/checkout@v4.1.6
+
+      - uses: actions/setup-java@v4.2.1
+        with:
+          java-version: '21'
+          distribution: 'corretto'
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/test-report"
+          chmod +x gradlew
+          ./gradlew test 2>&1 | tee "$RUNNER_TEMP/test-report/build-output.log"
+
+      - name: Zip test report
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -d build/reports/tests/test ]; then
+            cp -r build/reports/tests/test/. "$RUNNER_TEMP/test-report/"
+          fi
+          cd "$RUNNER_TEMP/test-report" && zip -r $GITHUB_WORKSPACE/POST_TRANSFORMATION_TEST_REPORT.zip .
+
+      - name: Upload test report
+        if: always()
+        continue-on-error: true
+        run: |
+          curl --fail -X POST "https://api.prod.poja.io/orgs/${{ env.ORG_ID }}/imports/${{ env.IMPORT_ID }}/test-reports/POST_TRANSFORMATION_TEST_REPORT" \
+            -H "Authorization: AppImportBearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @POST_TRANSFORMATION_TEST_REPORT.zip
+
+  update-import-state:
+    runs-on: ubuntu-latest
+    needs: post-transformation-test
+    if: always()
+
+    steps:
+      - name: Update import state
+        run: |
+          REPO_NAME=$(basename "${GITHUB_REPOSITORY}")
+
+          if [ "${{ needs.post-transformation-test.result }}" == "success" ]; then
+            JOB_STATUS="SUCCESS"
+          else
+            JOB_STATUS="FAILURE"
+          fi
+
+          curl --fail -X POST "https://api.prod.poja.io/orgs/${{ env.ORG_ID }}/imports/${{ env.IMPORT_ID }}/states" \
+            -H "Authorization: AppImportBearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                  --arg job_name "POST_TRANSFORMATION_TEST" \
+                  --arg job_status "$JOB_STATUS" \
+                  --arg run_id "${{ github.run_id }}" \
+                  --arg attempt_nb "${{ github.run_attempt }}" \
+                  --arg repo_owner "${{ github.repository_owner }}" \
+                  --arg repo_name "$REPO_NAME" \
+                  '{ job_name: $job_name, job_status: $job_status, run_id: $run_id, attempt_nb: $attempt_nb, repo_owner: $repo_owner, repo_name: $repo_name }')"
